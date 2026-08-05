@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Four Models</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto;
+         padding: 0 20px; color: #1a2733; }
+  h1 { margin-bottom: 4px; }
+  .sub { color: #6e8090; margin-bottom: 30px; }
+  .card { border: 1px solid #cbd8e0; border-radius: 8px; padding: 18px 20px;
+          margin-bottom: 18px; }
+  .card h2 { margin: 0 0 4px 0; font-size: 18px; color: #1c7293; }
+  .tag { font-size: 13px; color: #6e8090; margin-bottom: 12px; }
+  input[type=text], textarea { width: 100%; padding: 9px; font-size: 15px;
+                    border: 1px solid #cbd8e0; border-radius: 5px;
+                    font-family: inherit; box-sizing: border-box; }
+  button { background: #1c7293; color: #fff; border: 0; padding: 9px 18px;
+           border-radius: 5px; font-size: 15px; cursor: pointer; margin-top: 10px;
+           margin-right: 8px; }
+  button:hover { background: #145670; }
+  button.rec { background: #c0392b; }
+  pre { background: #edf3f6; padding: 12px; border-radius: 5px; margin-top: 12px;
+        white-space: pre-wrap; font-size: 14px; min-height: 20px; }
+  #img-preview { max-width: 100%; max-height: 260px; display: none;
+                 margin-top: 10px; border-radius: 5px; }
+  input[type=file] { margin-top: 10px; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<h1>Four Models, One App</h1>
+<div class="sub">Sentiment analysis, text summarization, speech-to-text and image captioning &mdash; four pretrained models on your own input.</div>
+
+<div class="card">
+  <h2>1 &middot; Sentiment analysis</h2>
+  <div class="tag">your text &rarr; label &nbsp;|&nbsp; pretrained DistilBERT</div>
+  <textarea id="s-in" rows="2">This lecture was surprisingly clear.</textarea>
+  <button onclick="goText('sentiment','s-in','s-out')">Analyse</button>
+  <pre id="s-out"></pre>
+</div>
+
+<div class="card">
+  <h2>2 &middot; Text summarization</h2>
+  <div class="tag">your text &rarr; summary &nbsp;|&nbsp; pretrained DistilBART (CNN/DailyMail)</div>
+  <textarea id="m-in" rows="5">The James Webb Space Telescope is the largest optical telescope in space. It was launched in December 2021 and is designed to conduct infrared astronomy. Its high resolution and sensitivity allow it to view objects too old, distant, or faint for the Hubble Space Telescope. This enables investigations across many fields of astronomy and cosmology, such as observation of the first stars, the formation of the first galaxies, and detailed atmospheric characterization of potentially habitable exoplanets.</textarea>
+  <button onclick="goText('summary','m-in','m-out')">Summarize</button>
+  <pre id="m-out"></pre>
+</div>
+
+<div class="card">
+  <h2>3 &middot; Speech to text</h2>
+  <div class="tag">your voice or audio file &rarr; text &nbsp;|&nbsp; pretrained Whisper (tiny.en)</div>
+  <button id="rec-btn" onclick="toggleRecord()">&#127908; Start recording</button>
+  <input type="file" id="audio-file" accept="audio/*" onchange="sendAudioFile(this.files[0])">
+  <pre id="p-out">Click the mic and speak in English, or choose an audio file.</pre>
+</div>
+
+<div class="card">
+  <h2>4 &middot; Image captioning</h2>
+  <div class="tag">your image &rarr; caption &nbsp;|&nbsp; pretrained BLIP</div>
+  <input type="file" id="img-file" accept="image/*" onchange="previewImage(this.files[0])">
+  <img id="img-preview">
+  <button onclick="sendImage()">Caption this image</button>
+  <pre id="c-out">Choose an image, then click Caption.</pre>
+</div>
+
+<script>
+// ---------- text endpoints (sentiment, summary) ----------
+async function goText(task, inId, outId) {
+  const out = document.getElementById(outId);
+  out.textContent = 'working... (first use loads the model, can take a minute)';
+  try {
+    const res = await fetch('/api/' + task, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: document.getElementById(inId).value })
+    });
+    const d = await res.json();
+    if (d.error) { out.textContent = 'Error: ' + d.error; return; }
+    out.textContent = task === 'sentiment'
+      ? d.label + '   (confidence ' + d.score + ')'
+      : d.summary + '\n\n(' + d.input_words + ' words in, summarized)';
+  } catch (e) { out.textContent = 'Error: ' + e; }
+}
+
+// ---------- speech: record mic (raw PCM capture) or upload file ----------
+let audioCtx = null, procNode = null, micStream = null, recBufs = [], recRate = 0;
+
+async function toggleRecord() {
+  const btn = document.getElementById('rec-btn');
+  const out = document.getElementById('p-out');
+
+  if (audioCtx) {                      // currently recording -> stop
+    procNode.disconnect();
+    micStream.getTracks().forEach(t => t.stop());
+    audioCtx.close();
+    audioCtx = null;
+    btn.innerHTML = '&#127908; Start recording';
+    btn.classList.remove('rec');
+    const total = recBufs.reduce((a, b) => a + b.length, 0);
+    if (total < recRate / 4) {         // less than ~0.25s captured
+      out.textContent = 'No audio captured — check that the right microphone is selected and not muted (Windows Settings > Privacy > Microphone).';
+      return;
+    }
+    const flat = new Float32Array(total);
+    let o = 0;
+    for (const b of recBufs) { flat.set(b, o); o += b.length; }
+    let peak = 0;
+    for (let i = 0; i < flat.length; i++) { const a = Math.abs(flat[i]); if (a > peak) peak = a; }
+    if (peak < 0.003) {
+      out.textContent = 'Recorded only silence. Another app (e.g. Zoom) is probably holding the microphone — leave the meeting or mute Zoom\'s mic access and try again. Also check the browser is using the right mic (padlock icon > site settings).';
+      return;
+    }
+    await sendSamples(downsample(flat, recRate, 16000));
+    return;
+  }
+
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    out.textContent = 'Microphone is blocked in this context. Open the app at http://localhost:5000 in Chrome or Edge (a normal browser window, not a preview pane) — mic access only works on localhost or https.';
+    return;
+  }
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    if (e.name === 'NotAllowedError')
+      out.textContent = 'Microphone permission denied. Click the padlock/mic icon in the address bar, allow the microphone, then reload the page.';
+    else if (e.name === 'NotFoundError')
+      out.textContent = 'No microphone found on this device.';
+    else
+      out.textContent = 'Microphone error: ' + e;
+    return;
+  }
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  recRate = audioCtx.sampleRate;
+  recBufs = [];
+  const src = audioCtx.createMediaStreamSource(micStream);
+  procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  procNode.onaudioprocess = e => recBufs.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(procNode);
+  procNode.connect(audioCtx.destination);
+  btn.innerHTML = '&#9209; Stop';
+  btn.classList.add('rec');
+  out.textContent = 'recording... speak now, then click Stop';
+}
+
+function downsample(data, from, to) {
+  if (from === to) return data;
+  const ratio = from / to;
+  const n = Math.floor(data.length / ratio);
+  const res = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const lo = Math.floor(i * ratio), hi = Math.min(Math.floor((i + 1) * ratio), data.length);
+    let s = 0;
+    for (let j = lo; j < hi; j++) s += data[j];
+    res[i] = s / (hi - lo || 1);
+  }
+  return res;
+}
+
+// uploaded audio files (mp3/wav/etc): decode, resample to 16 kHz, send
+async function sendAudioFile(file) {
+  if (!file) return;
+  const out = document.getElementById('p-out');
+  out.textContent = 'processing audio file...';
+  try {
+    const raw = await file.arrayBuffer();
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await ctx.decodeAudioData(raw);
+    ctx.close();
+    const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    const rendered = await off.startRendering();
+    await sendSamples(rendered.getChannelData(0));
+  } catch (e) { out.textContent = 'Could not decode that audio file: ' + e; }
+}
+
+async function sendSamples(samples) {
+  const out = document.getElementById('p-out');
+  out.textContent = 'transcribing... (first use loads Whisper, can take a minute)';
+  try {
+    const wav = encodeWav(samples, 16000);
+    const fd = new FormData();
+    fd.append('audio', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
+    const res = await fetch('/api/speech', { method: 'POST', body: fd });
+    const d = await res.json();
+    out.textContent = d.error ? 'Error: ' + d.error
+      : d.seconds + 's of audio\ntranscript: ' + (d.transcript || '(nothing recognized)');
+  } catch (e) { out.textContent = 'Error: ' + e; }
+}
+
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return buf;
+}
+
+// ---------- image captioning ----------
+function previewImage(file) {
+  if (!file) return;
+  const img = document.getElementById('img-preview');
+  img.src = URL.createObjectURL(file);
+  img.style.display = 'block';
+  document.getElementById('c-out').textContent = 'Ready — click Caption.';
+}
+
+async function sendImage() {
+  const out = document.getElementById('c-out');
+  const file = document.getElementById('img-file').files[0];
+  if (!file) { out.textContent = 'Choose an image first.'; return; }
+  out.textContent = 'captioning... (first use loads BLIP, can take a minute)';
+  try {
+    const fd = new FormData();
+    fd.append('image', file);
+    const res = await fetch('/api/caption', { method: 'POST', body: fd });
+    const d = await res.json();
+    out.textContent = d.error ? 'Error: ' + d.error
+      : 'caption: ' + d.caption + '\n(image ' + d.size + ')';
+  } catch (e) { out.textContent = 'Error: ' + e; }
+}
+</script>
+</body>
+</html>
